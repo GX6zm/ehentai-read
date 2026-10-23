@@ -1276,6 +1276,7 @@
             <label><span>附带 info.txt</span><input type="checkbox" id="set-info"></label>
             <label><span>重扫画廊页</span><input type="checkbox" id="set-rescan"></label>
             <label><span>webp 转 jpg</span><input type="checkbox" id="set-webp"></label>
+            <label><span>速度</span><a href="#" id="set-default" style="color:#8ab4f8;text-decoration:none">恢复默认（6 并发 / 250ms）</a></label>
           </div>
           <div class="log" id="log"></div>
         </div>
@@ -1385,6 +1386,16 @@
     $('set-info').addEventListener('change', (e) => { settings.infoFile = e.target.checked; saveSettings(); });
     $('set-rescan').addEventListener('change', (e) => { settings.rescan = e.target.checked; saveSettings(); });
     $('set-webp').addEventListener('change', (e) => { settings.webpToJpg = e.target.checked; saveSettings(); });
+    // 老版本用户存在 GM 里的还是 3 并发 / 700ms，升级后默认值不会自动生效，给个一键回到新版默认的入口
+    $('set-default').addEventListener('click', (e) => {
+      e.preventDefault();
+      settings.concurrency = 6;
+      settings.gap = 250;
+      limiter.setRate(settings.concurrency, settings.gap);
+      saveSettings();
+      syncSettings();
+      api.log('已恢复默认速度：6 并发 / 250ms 间隔');
+    });
 
     /* ---------- 任务控制 ---------- */
     const enqueueCurrent = () => {
