@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         E-Hentai 画廊下载器
 // @namespace    https://local/ehdl
-// @version      1.3.0
+// @version      1.4.0
 // @description  在 E-Hentai / ExHentai 一键打包下载画廊原图：多画廊队列、断点续传、失败重试、限速保护、逐图存文件夹
 // @author       local
 // @match        https://e-hentai.org/*
@@ -59,8 +59,8 @@
   const settings = Object.assign(
     {
       mode: 'zip',        // 'zip' | 'folder'
-      concurrency: 3,     // 同时进行的图片请求数
-      gap: 700,           // 相邻请求的最小间隔（毫秒）
+      concurrency: 6,     // 同时进行的请求数（解析图片页 + 下载图片共用这个数）
+      gap: 250,           // 相邻请求的最小间隔（毫秒）；越小越快，越小也越容易被限流
       infoFile: true,     // 是否附带 info.txt
       rescan: false,      // 恢复任务时是否重新扫描画廊页
       maxFavPages: 20,    // 抓取收藏夹最多翻多少页
@@ -312,6 +312,19 @@
   }
 
   const limiter = new Limiter(settings.concurrency, settings.gap);
+
+  /** 被限流时自动降速：并发减半、间隔至少翻倍（用户可在设置里改回） */
+  function softenRate() {
+    const conc = Math.max(2, Math.floor(settings.concurrency / 2));
+    const gap = Math.min(1500, Math.max(settings.gap * 2, 400));
+    if (conc !== settings.concurrency || gap !== settings.gap) {
+      settings.concurrency = conc;
+      settings.gap = gap;
+      limiter.setRate(conc, gap);
+      saveSettings();
+      ui.log(`已自动降速：并发 ${conc}，间隔 ${gap}ms（可在设置里改回）`, 'warn');
+    }
+  }
 
   function sameOrigin(url) {
     try {
@@ -691,28 +704,24 @@
       ui.info(`${this.title} · 共 ${this.total} 页`);
       await this.checkpoint();
 
-      /* --- 阶段 2：解析每页的原图直链（断点续传：已有直链直接复用） --- */
+      /* --- 阶段 2：准备输出目标 + 地址缓存 --- */
       const urls = this.state.urls.length === this.total
         ? this.state.urls.slice()
         : new Array(this.total).fill('');
       const alts = Array.isArray(this.state.alt) && this.state.alt.length === this.total
         ? this.state.alt.slice()
         : new Array(this.total).fill(null);
-      const needResolve = urls.filter((u) => !u).length;
-      if (needResolve > 0) {
-        await this._resolveUrls(pageUrls, urls, alts);
-      }
       this.state.urls = urls;
       this.state.alt = alts;
-      this._saveState();
 
-      /* --- 阶段 3：准备输出目标 --- */
       const sink = await this._openSink();
       if (!sink) throw new StopError('abort', '未选择保存位置');
 
-      /* --- 阶段 4：下载并写入（按顺序，支持跳过已存在文件） --- */
+      /* --- 阶段 3：流水线 —— 解析出一页的原图直链，立刻下载并写入 ---
+       * 旧版是「先把 849 页全部解析完，再开始下载」，两轮完全串行；
+       * 现在每个 worker 解析自己那页、就地下载，整体耗时接近单轮。 */
       this.pad = Math.max(3, String(this.total).length);
-      const conc = Math.max(1, Math.min(8, settings.concurrency));
+      const conc = Math.max(1, Math.min(12, settings.concurrency));
 
       let lastTick = Date.now();
       let lastDone = 0;
@@ -720,118 +729,55 @@
       let lastBytes = 0;
       let bps = 0;     // 字节/秒（显示速度）
 
-      for (let base = 0; base < this.total; base += conc) {
-        await this.checkpoint();
-        const slice = [];
-        for (let i = base; i < Math.min(base + conc, this.total); i++) slice.push(i);
+      // ZIP 写入是流式的，并发写会把压缩包写坏，所以用 promise 链串行化
+      let writeChain = Promise.resolve();
+      const writeSerial = (fn) => {
+        writeChain = writeChain.then(fn, fn);
+        return writeChain;
+      };
 
-        const results = await Promise.all(
-          slice.map(async (i) => {
-            if (!urls[i]) {
-              ui.log(`第 ${i + 1} 页缺少原图地址，跳过`, 'warn');
-              return { i, name: '', data: null };
-            }
-            // 已存在检查：扩展名可能因回退（jpg→webp）而不同，六种都探一遍
-            for (const e of ['jpg', 'webp', 'png', 'gif', 'bmp', 'avif']) {
-              const probe = this._fileName(i, '', e);
-              if (await sink.exists(probe)) return { i, name: probe, skipped: true };
-            }
-            const tried = [];
-            const grab = async (list) => {
-              let lastErr = new Error('没有可用的原图地址');
-              for (const u of list) {
-                try {
-                  let data = await fetchBinary(u);
-                  let kind = imageKind(data);
-                  if (!kind) {
-                    tried.push(`${shortUrl(u)} → ${looksLikeHtml(data) ? 'HTML' : '非图片'}(${data.byteLength}B)`);
-                    lastErr = new Error(looksLikeHtml(data)
-                      ? '返回的是登录页/错误页（原图链接需要先登录 E-Hentai）'
-                      : '返回内容不是图片');
-                    continue;
-                  }
-                  if (kind === 'webp' || kind === 'avif') {
-                    if (settings.webpToJpg !== false) {
-                      const conv = await convertToJpeg(data);
-                      if (conv && imageKind(conv) === 'jpg') { data = conv; kind = 'jpg'; }
-                    }
-                    if (!this._webpHinted) {
-                      this._webpHinted = true;
-                      ui.log('该画廊只取到重采样 webp/avif：已转成 JPG 保存（设置里可关闭）；要真原图请在浏览器登录 E-Hentai', 'warn');
-                    }
-                  }
-                  // 名字跟着「真正拿到的字节」走，避免 webp 存成 .jpg
-                  return { i, name: this._fileName(i, u, kind), data };
-                } catch (e) {
-                  if (e instanceof StopError) throw e;
-                  tried.push(`${shortUrl(u)} → ${e.message}`);
-                  lastErr = e;
-                }
-              }
-              throw new Error(`${lastErr.message}｜已试 ${tried.join(' / ') || '无候选'}`);
-            };
+      let next = 0;
+      let abortErr = null;
 
-            try {
-              return await grab([urls[i], ...((alts[i] || []).filter(Boolean))]);
-            } catch (e) {
-              if (e instanceof StopError) throw e;
-              // 自愈：缓存里的地址可能来自老版本（只有 /fullimg/，没有 hath 备用地址）。
-              // 失败一次就回捞图片页重新解析，避免整个任务被历史缓存卡死。
-              try {
-                const html = await fetchText(pageUrls[i], { label: '图片页' });
-                const fresh = parseImagePage(html).candidates;
-                if (fresh.length) {
-                  urls[i] = fresh[0];
-                  alts[i] = fresh.slice(1);
-                  this.state.urls = urls;
-                  this.state.alt = alts;
-                  return await grab(fresh);
-                }
-              } catch (e2) {
-                if (e2 instanceof StopError) throw e2;
-              }
-              this.failedIds.push(i);
-              ui.log(`第 ${i + 1} 页失败：${e.message}`, 'err');
-              return { i, name: '', data: null };
-            }
-          })
-        );
-
-        for (const r of results) {
-          if (r.skipped) {
-            this.doneCount++;
-            continue;
+      const worker = async () => {
+        while (!abortErr) {
+          await this.checkpoint();
+          if (abortErr) return;
+          const i = next++;
+          if (i >= this.total) return;
+          try {
+            await this._processPage(i, pageUrls, urls, alts, sink, writeSerial);
+          } catch (e) {
+            if (!abortErr) abortErr = e;
+            return;
           }
-          if (!r.data) continue;
-          await sink.add(r.name, r.data);
-          const _ext = String(r.name).split('.').pop().toLowerCase();
-          this._kinds[_ext] = (this._kinds[_ext] || 0) + 1;
-          this.bytes += r.data.byteLength;
-          this.doneCount++;
-          if (!this.state.done.includes(r.i)) this.state.done.push(r.i);
+          const now = Date.now();
+          const dt = now - lastTick;
+          if (dt > 800) {
+            speed = ((this.doneCount - lastDone) * 1000) / dt;
+            bps = ((this.bytes - lastBytes) * 1000) / dt;
+            lastTick = now;
+            lastDone = this.doneCount;
+            lastBytes = this.bytes;
+            const remain = this.total - this.doneCount;
+            ui.progress({
+              phase: '解析+下载',
+              done: this.doneCount,
+              total: this.total,
+              bytes: this.bytes,
+              eta: speed > 0 ? (remain / speed) * 1000 : Infinity,
+              size: sink.size,
+              bps,
+            });
+            if (this.doneCount % 20 === 0) this._saveState();
+          }
         }
+      };
 
-        const now = Date.now();
-        const dt = now - lastTick;
-        if (dt > 800) {
-          speed = ((this.doneCount - lastDone) * 1000) / dt;
-          bps = ((this.bytes - lastBytes) * 1000) / dt;
-          lastTick = now;
-          lastDone = this.doneCount;
-          lastBytes = this.bytes;
-        }
-        const remain = this.total - this.doneCount;
-        ui.progress({
-          phase: '下载',
-          done: this.doneCount,
-          total: this.total,
-          bytes: this.bytes,
-          eta: speed > 0 ? (remain / speed) * 1000 : Infinity,
-          size: sink.size,
-          bps,
-        });
-        if (this.doneCount % 20 === 0) this._saveState();
-      }
+      const nWorkers = Math.max(1, Math.min(conc, this.total));
+      await Promise.all(Array.from({ length: nWorkers }, () => worker()));
+      await writeChain.catch(() => {});
+      if (abortErr) throw abortErr;
 
       await this.checkpoint();
 
@@ -896,45 +842,116 @@
       return all;
     }
 
-    async _resolveUrls(pageUrls, urls, alts) {
-      const conc = Math.min(3, Math.max(1, settings.concurrency));
-      for (let base = 0; base < pageUrls.length; base += conc) {
-        await this.checkpoint();
-        const idx = [];
-        for (let i = base; i < Math.min(base + conc, pageUrls.length); i++) {
-          if (!urls[i]) idx.push(i);
-        }
-        if (!idx.length) continue;
+    _markFailed(i) {
+      if (!this.failedIds.includes(i)) this.failedIds.push(i);
+    }
 
-        await Promise.all(
-          idx.map(async (i) => {
-            try {
-              const html = await fetchText(pageUrls[i], { label: '图片页' });
-              const { candidates } = parseImagePage(html);
-              if (!candidates.length) throw new Error('未找到原图链接');
-              urls[i] = candidates[0];
-              alts[i] = candidates.slice(1);
-            } catch (e) {
-              if (e instanceof StopError) throw e;
-              this.failedIds.push(i);
-              ui.log(`解析第 ${i + 1} 页失败：${e.message}`, 'err');
-            }
-          })
-        );
-
-        const resolved = urls.filter(Boolean).length;
-        ui.progress({ phase: '解析原图地址', done: resolved, total: pageUrls.length });
-        if (base % (conc * 20) === 0) {
+    /**
+     * 处理单页：没有缓存直链就先解析这一页 → 下载 → 串行写入 sink。
+     * 单页失败只记进 failedIds 不抛出（StopError 例外：停止/限流要中断整轮）。
+     */
+    async _processPage(i, pageUrls, urls, alts, sink, writeSerial) {
+      /* 1. 解析这一页的原图直链（续传时用缓存，不再请求） */
+      if (!urls[i]) {
+        try {
+          const html = await fetchText(pageUrls[i], { label: '图片页' });
+          const { candidates } = parseImagePage(html);
+          if (!candidates.length) throw new Error('未找到原图链接');
+          urls[i] = candidates[0];
+          alts[i] = candidates.slice(1);
           this.state.urls = urls;
           this.state.alt = alts;
-          this._saveState();
+        } catch (e) {
+          if (e instanceof StopError) throw e;
+          this._markFailed(i);
+          ui.log(`解析第 ${i + 1} 页失败：${e.message}`, 'err');
+          return;
         }
       }
-      this.state.urls = urls;
-      this.state.alt = alts;
-      this._saveState();
-      const withAlt = alts.filter((a) => a && a.length).length;
-      ui.log(`原图地址解析完成：${urls.filter(Boolean).length}/${pageUrls.length} 页，其中 ${withAlt} 页有备用地址`);
+
+      /* 2. 文件夹模式：已存在同名文件直接跳过（扩展名会随回退变化，六种都探） */
+      if (typeof sink.exists === 'function') {
+        for (const e of ['jpg', 'webp', 'png', 'gif', 'bmp', 'avif']) {
+          if (await sink.exists(this._fileName(i, '', e))) { this.doneCount++; return; }
+        }
+      }
+
+      /* 3. 逐个候选地址尝试，直到拿到真正的图片字节 */
+      const tried = [];
+      const grab = async (list) => {
+        let err = new Error('没有可用的原图地址');
+        for (const u of list) {
+          try {
+            let data = await fetchBinary(u);
+            let kind = imageKind(data);
+            if (!kind) {
+              tried.push(`${shortUrl(u)} → ${looksLikeHtml(data) ? 'HTML' : '非图片'}(${data.byteLength}B)`);
+              err = new Error(looksLikeHtml(data)
+                ? '返回的是登录页/错误页（原图链接需要先登录 E-Hentai）'
+                : '返回内容不是图片');
+              continue;
+            }
+            if (kind === 'webp' || kind === 'avif') {
+              if (settings.webpToJpg !== false) {
+                const conv = await convertToJpeg(data);
+                if (conv && imageKind(conv) === 'jpg') { data = conv; kind = 'jpg'; }
+              }
+              if (!this._webpHinted) {
+                this._webpHinted = true;
+                ui.log('该画廊只取到重采样 webp/avif：已转成 JPG 保存（设置里可关闭）；要真原图请在浏览器登录 E-Hentai', 'warn');
+              }
+            }
+            // 名字跟着「真正拿到的字节」走，避免 webp 存成 .jpg
+            return { name: this._fileName(i, u, kind), data };
+          } catch (e) {
+            if (e instanceof StopError) throw e;
+            tried.push(`${shortUrl(u)} → ${e.message}`);
+            err = e;
+          }
+        }
+        throw new Error(`${err.message}｜已试 ${tried.join(' / ') || '无候选'}`);
+      };
+
+      let got = null;
+      let lastErr = null;
+      try {
+        got = await grab([urls[i], ...((alts[i] || []).filter(Boolean))]);
+      } catch (e) {
+        if (e instanceof StopError) throw e;
+        lastErr = e;
+        // 自愈：缓存里的地址可能来自老版本（只有 /fullimg/，没有 hath 备用地址）。
+        // 失败一次就回捞图片页重新解析，避免整个任务被历史缓存卡死。
+        try {
+          const html = await fetchText(pageUrls[i], { label: '图片页' });
+          const fresh = parseImagePage(html).candidates;
+          if (fresh.length) {
+            urls[i] = fresh[0];
+            alts[i] = fresh.slice(1);
+            this.state.urls = urls;
+            this.state.alt = alts;
+            got = await grab(fresh);
+            lastErr = null;
+          }
+        } catch (e2) {
+          if (e2 instanceof StopError) throw e2;
+          lastErr = e2;
+        }
+      }
+      if (!got) {
+        this._markFailed(i);
+        ui.log(`第 ${i + 1} 页失败：${(lastErr && lastErr.message) || '未知错误'}`, 'err');
+        return;
+      }
+
+      /* 4. 写入（串行化：ZIP 是流式的，并发写会写坏） */
+      await writeSerial(async () => {
+        await sink.add(got.name, got.data);
+        const ext = String(got.name).split('.').pop().toLowerCase();
+        this._kinds[ext] = (this._kinds[ext] || 0) + 1;
+        this.bytes += got.data.byteLength;
+        this.doneCount++;
+        if (!this.state.done.includes(i)) this.state.done.push(i);
+      });
     }
 
     async _openSink() {
@@ -1101,7 +1118,8 @@
         if (e instanceof StopError && e.kind === 'abort') {
           item.status = 'pending';
         } else if (e instanceof StopError && e.kind === 'throttle') {
-          // 被限流：退避后重跑同一任务（最多 5 次）
+          // 被限流：先自动降速，再退避重跑同一任务（最多 5 次）
+          softenRate();
           item.throttleRetries = (item.throttleRetries || 0) + 1;
           ui.log(`触发限流，20 秒后重试（第 ${item.throttleRetries} 次）`, 'warn');
           if (item.throttleRetries > 5) {
@@ -1253,7 +1271,7 @@
                 <option value="folder">逐图存文件夹</option>
               </select>
             </label>
-            <label><span>并发请求数</span><input type="number" id="set-conc" min="1" max="8" step="1"></label>
+            <label><span>并发请求数</span><input type="number" id="set-conc" min="1" max="12" step="1"></label>
             <label><span>请求间隔(ms)</span><input type="number" id="set-gap" min="0" max="5000" step="100"></label>
             <label><span>附带 info.txt</span><input type="checkbox" id="set-info"></label>
             <label><span>重扫画廊页</span><input type="checkbox" id="set-rescan"></label>
@@ -1353,7 +1371,7 @@
     });
     $('set-mode').addEventListener('change', (e) => { settings.mode = e.target.value; saveSettings(); });
     $('set-conc').addEventListener('change', (e) => {
-      settings.concurrency = Math.max(1, Math.min(8, parseInt(e.target.value, 10) || 3));
+      settings.concurrency = Math.max(1, Math.min(12, parseInt(e.target.value, 10) || 6));
       e.target.value = settings.concurrency;
       limiter.setRate(settings.concurrency, settings.gap);
       saveSettings();
