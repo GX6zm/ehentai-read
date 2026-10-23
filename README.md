@@ -90,13 +90,20 @@
 ```powershell
 cd e-hentai-tools
 npm install --no-save jsdom      # 只需一次
-node test/download-logic.js      # 下载器解析 + ZIP 结构，39 项
+node test/download-logic.js      # 下载器解析 + ZIP 结构/CRC，55 项
+node test/pipeline-logic.js      # 流水线：打桩网络跑完 20 页，9 项
+node test/queue-logic.js         # 队列持久化，17 项
 # 汉化测试需要真实页面样本，放在 %TEMP%\ehprobe：
 #   front.html / gallery.html / i4.html（图片页）
 node test/i18n-logic.js          # 汉化匹配 + 撤销，50 项
+
+# 排查「解压不了」：结构 + 每条 CRC
+node test/zip-check.js "某个包.zip"
+# 修复旧版本写出的 CRC=0 的包（不碰文件内容，只重算头部 CRC）
+node tools/fix-zip-crc.js "旧包.zip"
 ```
 
-ZIP 结构另外用 .NET `ZipFile.OpenRead` 与 `Expand-Archive` 双重校验过，AES 无关，STORE 方式可直接解压。
+ZIP 结构另外用 .NET `ZipFile.OpenRead`、`Expand-Archive` 与 Python `zipfile.testzip()`（会逐条校验 CRC）校验过，AES 无关，STORE 方式可直接解压。
 
 ## 四、需要注意的限制
 
@@ -121,7 +128,11 @@ e-hentai-tools/
     ├── download-logic.js         # 下载器解析 / 写包测试
     ├── pipeline-logic.js         # 流水线集成测试（打桩网络，验证并发与解析下载重叠）
     ├── queue-logic.js            # 队列持久化测试
+    ├── zip-check.js              # ZIP 体检（结构 + 每条 CRC，排查「解压不了」）
     └── i18n-logic.js             # 汉化无头测试
+
+tools/
+└── fix-zip-crc.js                # 修复旧版写出的 CRC=0 的 ZIP（原地重算 CRC 字段）
 ```
 
 下载器内部链路：`ZipWriter`（STORE 写 ZIP + 自算 CRC32）→ `MemoryZipSink` / `FolderSink` → `Limiter`（并发 + 间隔调度，限流自动降速）→ `fetchText` / `fetchBinary`（重试 + 限流/封禁识别）→ 解析器（`parseGalleryMeta` / `parseThumbLinks` / `parseImagePage` / `sniffImage`）→ `GalleryJob`（扫描 → 流水线：解析图片页与下载图片并行，写入串行）→ 队列 → Shadow DOM 面板。
@@ -134,6 +145,7 @@ e-hentai-tools/
 | 提示「需要 Tampermonkey 环境」 | 脚本被当普通 JS 引入了，用油猴安装 |
 | 解析阶段大量失败 | 大概率被限流：脚本会自动降速并重排队；仍失败就把间隔调到 600ms 以上，隔几分钟再跑 |
 | ZIP 打开报损坏 | 中途点了停止；ZIP 只在全部完成后写出，改用文件夹模式可避免 |
+| 解压时报「CRC 错误」/ 解压不了 | 1.4.0 及更早的 bug：webp 转 JPG 后的字节是 `ArrayBuffer`，算 CRC 时长度取成 0，于是所有图片条目的 CRC 都写成 0（图片数据本身是好的）。**1.4.1 已修复，重新下载即可**；已经下好的旧包不用重下，用 `node tools/fix-zip-crc.js "旧包.zip"` 原地重算 CRC（输出到 `... (修复).zip`），或用 7-Zip 的「修复压缩包」 |
 | 下载没弹出保存框 | 浏览器拦截了下载，允许本站下载即可 |
 | 已登录却提示「未检测到登录 cookie」 | 面板日志会显示登录态检测结果；若确实登录了，确认下载时点的是同站（e-hentai.org）页面，别在 ExHentai 与 E-Hentai 混用（两者 cookie 不通用） |
 | 下载的图打不开 / 「不支持此文件格式」 | 旧版按 URL 后缀命名，hath 给 webp 却存成 .jpg。更新脚本后重新下载：未登录会转 JPG，登录后拿真原图 |

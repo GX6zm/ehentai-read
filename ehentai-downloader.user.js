@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         E-Hentai 画廊下载器
 // @namespace    https://local/ehdl
-// @version      1.4.0
+// @version      1.4.1
 // @description  在 E-Hentai / ExHentai 一键打包下载画廊原图：多画廊队列、断点续传、失败重试、限速保护、逐图存文件夹
 // @author       local
 // @match        https://e-hentai.org/*
@@ -128,9 +128,15 @@
     return t;
   })();
 
+  /**
+   * CRC32。接受 Uint8Array / ArrayBuffer / 任何 ArrayBufferView——
+   * 早期版本把 ArrayBuffer 直接传进来，`buf.length` 是 undefined，循环一次都不跑，
+   * 结果写进 ZIP 的 CRC 恒为 0（数据是好的，但 WinRAR/7-Zip 校验时会报"CRC 错误"甚至拒绝解压）。
+   */
   function crc32(buf) {
+    const bytes = toBytes(buf);
     let c = 0xffffffff;
-    for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
     return (c ^ 0xffffffff) >>> 0;
   }
 
@@ -156,8 +162,11 @@
     }
 
     async add(name, data) {
+      // 统一成 Uint8Array：调用方可能给 ArrayBuffer（webp → jpg 的产物），
+      // 直接算 CRC 会得到 0（arraybuffer 没有 length），ZIP 会被解压工具判为损坏。
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
       const nameBytes = textEncoder.encode(name);
-      const crc = crc32(data);
+      const crc = crc32(bytes);
       const { time, date } = dosDateTime(new Date());
       const head = new Uint8Array(30 + nameBytes.length);
       const dv = new DataView(head.buffer);
@@ -168,16 +177,16 @@
       dv.setUint16(10, time, true);
       dv.setUint16(12, date, true);
       dv.setUint32(14, crc, true);
-      dv.setUint32(18, data.byteLength, true);
-      dv.setUint32(22, data.byteLength, true);
+      dv.setUint32(18, bytes.byteLength, true);
+      dv.setUint32(22, bytes.byteLength, true);
       dv.setUint16(26, nameBytes.length, true);
       dv.setUint16(28, 0, true);
       head.set(nameBytes, 30);
 
       const localOffset = this.offset;
       await this._put(head);
-      await this._put(data);
-      this.entries.push({ nameBytes, crc, size: data.byteLength, time, date, localOffset });
+      await this._put(bytes);
+      this.entries.push({ nameBytes, crc, size: bytes.byteLength, time, date, localOffset });
     }
 
     async finish() {
@@ -576,11 +585,20 @@
    * 会重定向到 bounce_login.php 返回 HTML，而 hath.network 给的是 webp；
    * 只按 URL 命名就会把 webp 字节存成 001.jpg（Windows 照片查看器打不开）。
    */
+  /** 统一成 Uint8Array 视图：调用方可能传 ArrayBuffer（GM 回调、canvas.toBlob 转出来的），也可能传 Uint8Array */
+  function toBytes(ab) {
+    if (!ab) return new Uint8Array(0);
+    if (ab instanceof Uint8Array) return ab;
+    if (ab instanceof ArrayBuffer) return new Uint8Array(ab);
+    return new Uint8Array(ab.buffer, ab.byteOffset, ab.byteLength);
+  }
+
   function imageKind(ab) {
-    if (!ab || ab.byteLength < 12) return '';
-    const u = new Uint8Array(ab, 0, Math.min(16, ab.byteLength));
+    const bytes = toBytes(ab);
+    if (bytes.length < 12) return '';
+    const u = bytes.subarray(0, Math.min(16, bytes.length));
     const at = (i) => u[i] || 0;
-    const ascii = (i, n) => String.fromCharCode.apply(null, Array.from(u.slice(i, i + n)));
+    const ascii = (i, n) => String.fromCharCode.apply(null, Array.from(u.subarray(i, i + n)));
     if (at(0) === 0xff && at(1) === 0xd8 && at(2) === 0xff) return 'jpg';  // jpeg
     if (at(0) === 0x89 && ascii(1, 3) === 'PNG') return 'png';
     if (ascii(0, 4) === 'GIF8') return 'gif';
@@ -597,8 +615,9 @@
 
   /** 响应看起来像 HTML（登录跳转页 / 错误页）时给一句人话提示 */
   function looksLikeHtml(ab) {
-    if (!ab || !ab.byteLength) return false;
-    const u = new Uint8Array(ab, 0, Math.min(64, ab.byteLength));
+    const bytes = toBytes(ab);
+    if (!bytes.length) return false;
+    const u = bytes.subarray(0, Math.min(64, bytes.length));
     let s = '';
     for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
     return /^\s*</.test(s) && /<!doctype html|<html|bounce_login/i.test(s);
@@ -622,7 +641,7 @@
       ctx.drawImage(bmp, 0, 0);
       const out = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.92));
       if (!out) return null;
-      return await out.arrayBuffer();
+      return new Uint8Array(await out.arrayBuffer());
     } catch (e) {
       return null;
     }

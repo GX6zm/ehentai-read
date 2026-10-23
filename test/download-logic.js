@@ -131,21 +131,55 @@ ok(lib.sanitize('a/b\\c:d*e?f"g<h>i|j') === 'a_b_c_d_e_f_g_h_i_j', 'sanitize 去
 /* ---------- 6. CRC32 / ZIP ---------- */
 ok(lib.crc32(new TextEncoder().encode('123456789')) === 0xcbf43926, 'crc32 与标准向量一致');
 ok(lib.crc32(new TextEncoder().encode('')) === 0, 'crc32 空数据为 0');
+// 回归：webp→jpg 转出来的产物是 ArrayBuffer，曾经直接传进 ZipWriter.add，
+// 导致 CRC 恒为 0（数据没问题，但 WinRAR/7-Zip 校验时报 CRC 错误、拒绝解压）
+{
+  const u8 = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  ok(lib.crc32(u8.buffer) === lib.crc32(u8), 'crc32 接受 ArrayBuffer，结果与 Uint8Array 一致');
+  ok(lib.crc32(u8.buffer) !== 0, 'crc32(ArrayBuffer) 不再是 0');
+  const view = u8.subarray(2, 8);
+  ok(lib.crc32(view) === lib.crc32(new Uint8Array([3, 4, 5, 6, 7, 8])), 'crc32 正确处理 subarray 视图');
+  ok(lib.imageKind(u8.buffer) === '' && lib.imageKind(u8) === '', 'imageKind 同时接受 ArrayBuffer 和 Uint8Array');
+}
 
 (async () => {
   const chunks = [];
   const zw = new lib.ZipWriter((bytes) => { chunks.push(bytes); });
   await zw.add('a.txt', new TextEncoder().encode('hello'));
   await zw.add('sub/b.txt', new TextEncoder().encode('world'));
+  const abEntry = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4, 5, 6, 7, 8, 0xff, 0xd9]);
+  await zw.add('003.jpg', abEntry.buffer); // 故意传 ArrayBuffer
   await zw.finish();
   const total = chunks.reduce((n, c) => n + c.byteLength, 0);
   ok(total > 100, 'ZipWriter 产出非空字节流', String(total));
   const eocd = chunks[chunks.length - 1];
   ok(new DataView(eocd.buffer, eocd.byteOffset, 4).getUint32(0, true) === 0x06054b50, 'ZipWriter 以 EOCD 结尾');
-  ok(new DataView(eocd.buffer, eocd.byteOffset).getUint16(10, true) === 2, 'ZipWriter 中央目录记录 2 个条目');
+  ok(new DataView(eocd.buffer, eocd.byteOffset).getUint16(10, true) === 3, 'ZipWriter 中央目录记录 3 个条目');
 
   const out = path.join(process.env.TEMP || '/tmp', 'ehzip-test.zip');
   fs.writeFileSync(out, Buffer.concat(chunks.map((c) => Buffer.from(c))));
+
+  // 用 zip-check 解析刚写出的包，断言每条 CRC 都非 0 且与实际数据一致
+  const zip = fs.readFileSync(out);
+  const dv = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  let eocdPos = -1;
+  for (let i = zip.length - 22; i >= 0; i--) { if (dv.getUint32(i, true) === 0x06054b50) { eocdPos = i; break; } }
+  let p = dv.getUint32(eocdPos + 16, true);
+  const n = dv.getUint16(eocdPos + 10, true);
+  let crcOk = true;
+  for (let i = 0; i < n; i++) {
+    const crc = dv.getUint32(p + 16, true);
+    const csize = dv.getUint32(p + 20, true);
+    const nlen = dv.getUint16(p + 28, true);
+    const elen = dv.getUint16(p + 30, true);
+    const clen = dv.getUint16(p + 32, true);
+    const lho = dv.getUint32(p + 42, true);
+    const dataStart = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
+    const got = lib.crc32(zip.subarray(dataStart, dataStart + csize));
+    if (crc !== got || crc === 0) { crcOk = false; console.error('  CRC 不符: ' + zip.subarray(p + 46, p + 46 + nlen) + ' ' + crc + ' vs ' + got); }
+    p += 46 + nlen + elen + clen;
+  }
+  ok(crcOk, 'ZipWriter 写出的每条记录 CRC 都正确（含 ArrayBuffer 输入）');
   console.log('zip written: ' + out);
 
   console.log('\n' + passed + ' 项通过' + (process.exitCode ? '，存在失败项' : ''));
