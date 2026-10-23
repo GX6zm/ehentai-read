@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         E-Hentai 画廊下载器
 // @namespace    https://local/ehdl
-// @version      1.4.1
+// @version      1.4.2
 // @description  在 E-Hentai / ExHentai 一键打包下载画廊原图：多画廊队列、断点续传、失败重试、限速保护、逐图存文件夹
 // @author       local
 // @match        https://e-hentai.org/*
@@ -1295,7 +1295,11 @@
             <label><span>附带 info.txt</span><input type="checkbox" id="set-info"></label>
             <label><span>重扫画廊页</span><input type="checkbox" id="set-rescan"></label>
             <label><span>webp 转 jpg</span><input type="checkbox" id="set-webp"></label>
-            <label><span>速度</span><a href="#" id="set-default" style="color:#8ab4f8;text-decoration:none">恢复默认（6 并发 / 250ms）</a></label>
+            <label><span>速度预设</span><span style="display:flex;gap:8px">
+              <a href="#" id="set-eco" style="color:#8ab4f8;text-decoration:none">保守</a>
+              <a href="#" id="set-default" style="color:#8ab4f8;text-decoration:none">默认</a>
+              <a href="#" id="set-turbo" style="color:#8ab4f8;text-decoration:none">极速</a>
+            </span></label>
           </div>
           <div class="log" id="log"></div>
         </div>
@@ -1406,14 +1410,19 @@
     $('set-rescan').addEventListener('change', (e) => { settings.rescan = e.target.checked; saveSettings(); });
     $('set-webp').addEventListener('change', (e) => { settings.webpToJpg = e.target.checked; saveSettings(); });
     // 老版本用户存在 GM 里的还是 3 并发 / 700ms，升级后默认值不会自动生效，给个一键回到新版默认的入口
-    $('set-default').addEventListener('click', (e) => {
-      e.preventDefault();
-      settings.concurrency = 6;
-      settings.gap = 250;
-      limiter.setRate(settings.concurrency, settings.gap);
+    const applyRate = (conc, gap, label) => {
+      settings.concurrency = conc;
+      settings.gap = gap;
+      limiter.setRate(conc, gap);
       saveSettings();
       syncSettings();
-      api.log('已恢复默认速度：6 并发 / 250ms 间隔');
+      api.log(`速度：${label}（${conc} 并发 / ${gap}ms 间隔）`);
+    };
+    $('set-default').addEventListener('click', (e) => { e.preventDefault(); applyRate(6, 250, '默认'); });
+    $('set-eco').addEventListener('click', (e) => { e.preventDefault(); applyRate(4, 500, '保守，防限流'); });
+    $('set-turbo').addEventListener('click', (e) => {
+      e.preventDefault();
+      applyRate(12, 0, '极速；一旦被限流会自动降速，长时间大批量建议用默认');
     });
 
     /* ---------- 任务控制 ---------- */
