@@ -1,7 +1,10 @@
 // ==UserScript==
 // @name         E-Hentai 画廊下载器
 // @namespace    https://local/ehdl
-// @version      1.4.2
+// @updateURL    https://raw.githubusercontent.com/GX6zm/ehentai-read/main/ehentai-downloader.user.js
+// @downloadURL  https://raw.githubusercontent.com/GX6zm/ehentai-read/main/ehentai-downloader.user.js
+// @homepageURL  https://github.com/GX6zm/ehentai-read
+// @version      1.4.3
 // @description  在 E-Hentai / ExHentai 一键打包下载画廊原图：多画廊队列、断点续传、失败重试、限速保护、逐图存文件夹
 // @author       local
 // @match        https://e-hentai.org/*

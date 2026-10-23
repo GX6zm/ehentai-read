@@ -27,10 +27,22 @@
 
 ### 安装
 
+两种方式，**想自动更新就用第一种**：
+
+**A. 从网络地址安装（推荐，之后自动更新）**
+
 1. 浏览器装 [Tampermonkey](https://www.tampermonkey.net/)（Edge / Chrome / Firefox 均可，文件夹模式需要 Chromium 内核）。
-2. Tampermonkey 面板 →「添加新脚本」，清空模板。
-3. 粘贴 [`ehentai-downloader.user.js`](ehentai-downloader.user.js) 全部内容，`Ctrl+S` 保存。
-4. 打开任意 `https://e-hentai.org/g/...`，右下角出现「EH 画廊下载器」面板。
+2. 打开下面任一地址，Tampermonkey 会弹出安装页，点「安装」：
+   - `https://raw.githubusercontent.com/GX6zm/ehentai-read/main/ehentai-downloader.user.js`
+   - 国内 raw 慢或打不开时用镜像：`https://cdn.jsdelivr.net/gh/GX6zm/ehentai-read@main/ehentai-downloader.user.js`
+3. 脚本头里有 `@updateURL` / `@downloadURL`，Tampermonkey 之后会按「设置 → 更新」里的周期（默认每天）自动检查并升级；也可以随时在「已安装脚本」里点「检查更新」立即比对版本号。
+
+**B. 从本地文件安装（不会自动更新）**
+
+1. 「添加新脚本」→ 清空模板 → 粘贴 [`ehentai-downloader.user.js`](ehentai-downloader.user.js) 全部内容 → `Ctrl+S`。
+2. 这种方式装出来的脚本没有来源地址，Tampermonkey 不知道去哪比对版本，**只能手动覆盖**；想自动更新请按 A 重装一次。
+
+装好后打开任意 `https://e-hentai.org/g/...`，右下角出现「EH 画廊下载器」面板。
 
 `@match` 已覆盖 `e-hentai.org` 与 `exhentai.org`；`@connect *` 是因为图床域名（`*.hath.network`、`*.ehgt.org` 等）经常轮换，首次运行 Tampermonkey 会弹一次跨域授权，点允许即可。
 
@@ -150,4 +162,6 @@ tools/
 | 已登录却提示「未检测到登录 cookie」 | 面板日志会显示登录态检测结果；若确实登录了，确认下载时点的是同站（e-hentai.org）页面，别在 ExHentai 与 E-Hentai 混用（两者 cookie 不通用） |
 | 下载的图打不开 / 「不支持此文件格式」 | 旧版按 URL 后缀命名，hath 给 webp 却存成 .jpg。更新脚本后重新下载：未登录会转 JPG，登录后拿真原图 |
 | 图片中文乱码 / 译文残留 | 汉化脚本设置里点「撤销汉化」，或刷新页面（卸载时也会自动恢复） |
+| 脚本不自动更新 | 只有从 `https://raw.githubusercontent.com/...` 这类网络地址安装的脚本才能自动更新（头部有 `@updateURL`/`@downloadURL`）；从本地粘贴安装的没有来源，需按「安装 A」重装一次。另外 Tampermonkey 默认「每天」才检查一次，可在「已安装脚本」里手动点「检查更新」 |
+| 自动更新没装上/版本没变 | 新版脚本的 `@version` 必须比本地大；Tampermonkey 的更新检查会缓存，点「检查更新」时若仍显示旧版本，等 24h 或清缓存后重试 |
 | 汉化没生效 | 确认设置不是「关闭」；某些浮层文案是服务端懒加载，等页面静止再点「重新汉化」 |

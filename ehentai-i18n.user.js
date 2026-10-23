@@ -1,7 +1,10 @@
 // ==UserScript==
 // @name         E-Hentai 界面汉化
 // @namespace    https://local/ehzh
-// @version      2.0.0
+// @updateURL    https://raw.githubusercontent.com/GX6zm/ehentai-read/main/ehentai-i18n.user.js
+// @downloadURL  https://raw.githubusercontent.com/GX6zm/ehentai-read/main/ehentai-i18n.user.js
+// @homepageURL  https://github.com/GX6zm/ehentai-read
+// @version      2.0.1
 // @description  把 E-Hentai / ExHentai 的界面文案翻译成中文：内置词库离线可用，可选在线机翻兜底；只翻译界面，不碰标题/标签/评论
 // @author       local
 // @match        https://e-hentai.org/*
